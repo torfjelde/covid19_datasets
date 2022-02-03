@@ -14,6 +14,42 @@ WALES_PATH = 'http://www2.nphs.wales.nhs.uk:8080/CommunitySurveillanceDocs.nsf/6
 
 SCOTLAND_PATH = 'https://raw.githubusercontent.com/DataScienceScotland/COVID-19-Management-Information/master/export/health-boards/cumulative-cases.csv'
 
+UK_CASES_PATH = 'https://api.coronavirus.data.gov.uk/v2/data?areaType={area_type}&metric=newCasesByPublishDate&format=csv'
+
+_country_area_code_prefix = {
+    "E": "England",
+    "S": "Scotland",
+    "W": "Wales",
+    "N": "Northern Ireland",  # TODO: Check if this is correct
+}
+
+@np.vectorize
+def _determine_country(area_code):
+    return _country_area_code_prefix[area_code[0]]
+
+def _load_uk_cases_dataset(area_type):
+    uk_cases_path = UK_CASES_PATH.format(area_type=area_type)
+    _log.info("Loading dataset from " + uk_cases_path)
+    df = pd.read_csv(uk_cases_path)
+    _log.info("Loaded")
+
+    df[DATE_COLUMN_NAME] = pd.to_datetime(df["date"].astype(str))
+
+    # Convert so that
+    # Each row corresponds to an area
+    # Each column corresponds to a date
+    df["newCasesByPublishDate"] = df["newCasesByPublishDate"].astype('float')
+    df = df[df['areaType'] == area_type]
+    df['Country'] = _determine_country(df["areaCode"])
+
+    df = df.rename(columns={"areaName": "Area name"})
+
+    df = df.pivot_table(index=['Country', 'Area name'], columns=DATE_COLUMN_NAME,
+                        values="newCasesByPublishDate")
+    df = _backfill_missing_data(df)
+
+    return df
+
 def _backfill_missing_data(df):
     """
     Datasets might have some dates missing if there were no cases reported on these dates
@@ -151,3 +187,38 @@ class UKCovid19Data:
 
         return df
 
+class UKCovid19DataV2:
+    """
+    Provides COVID-19 data for various parts of the UK
+    """
+
+    uk_cases_data = None
+    UPPER_TIER_AUTHORITY = 'utla'
+    LOWER_TIER_AUTHORITY = 'ltla'
+
+    def __init__(self, force_load=False, area_type=LOWER_TIER_AUTHORITY):
+        """
+        Loads datasets and store them in memory.
+        Further instances of this class will reuse the same data
+
+        :param force_load: If true, forces download of the dataset, even if it was loaded already
+        """
+        if UKCovid19DataV2.uk_cases_data is None or force_load:
+            UKCovid19DataV2.uk_cases_data = _load_uk_cases_dataset(area_type)
+
+    def get_cases_data(self):
+        """
+        Returns the dataset as Pandas dataframe
+
+        Format:
+        - Row index: Country (England, Wales or Scotland), Area name
+        - Columns: Dates
+        - Each cell value is a number of new cases registered on that day
+
+        Note: Scotland provides data by NHS Board, not by county
+        """
+        df = UKCovid19DataV2.uk_cases_data
+        # in case they have uneven number of columns
+        df = df.fillna(0.0)
+
+        return df
